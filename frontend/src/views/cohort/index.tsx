@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 
 import { request } from '@/api/client'
+import { useListResource } from '@/api/useListResource'
 
 const ENDPOINT = '/api/cohort'
 const columns = [
@@ -42,34 +43,24 @@ const stats = [
 type Row = Record<string, string | number | null>
 
 export default function CohortView() {
-  const [rows, setRows] = useState<Row[]>([])
-  const [total, setTotal] = useState(0)
-  const [errorMessage, setErrorMessage] = useState('')
   const [filters, setFilters] = useState<Record<string, string>>({})
   const filterFields = useMemo(() => columns.slice(0, 3), [])
+  const query = useMemo(() => new URLSearchParams(filters).toString(), [filters])
 
-  const reload = useCallback(async () => {
-    setErrorMessage('')
-    const query = new URLSearchParams(filters).toString()
-    try {
-      const response = await request(`${ENDPOINT}?${query}`)
-      if (!response.ok) {
-        throw new Error('用户分群列表读取失败')
-      }
-      const payload = await response.json()
-      setRows(payload.items ?? [])
-      setTotal(payload.total ?? 0)
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : '分群分析列表读取失败')
-    }
-  }, [filters])
-
-  useEffect(() => {
-    void reload()
-  }, [reload])
+  const {
+    rows,
+    total,
+    loading,
+    errorMessage,
+    isStale,
+    reload,
+    reportActionError,
+  } = useListResource(ENDPOINT, query, {
+    readErrorMessage: '用户分群列表读取失败',
+    networkErrorMessage: '分群分析列表读取失败',
+  })
 
   async function runAction(action: string, row: Row) {
-    setErrorMessage('')
     try {
       const response = await request(`${ENDPOINT}/${row.id}/actions`, {
         method: 'POST',
@@ -78,9 +69,12 @@ export default function CohortView() {
       if (!response.ok) {
         throw new Error('分群分析动作未生效，请稍后重试')
       }
+      // 动作完成后的重载是一次全新的读取意图：动作前已发出的旧读取代次
+      // 更低，其晚到结果没有资格覆盖本次重载。
       await reload()
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : '分群分析操作失败')
+      // 动作失败不产生读取代次，只更新反馈；条目仍为最近一次成功内容。
+      reportActionError(error instanceof Error ? error.message : '分群分析操作失败')
     }
   }
 
@@ -92,7 +86,7 @@ export default function CohortView() {
           <p className="page-desc">维护用户分群的输入、执行约束与结果记录，为分群分析提供可验证的数据工程流程。</p>
         </div>
         <div className="page-actions">
-          <button className="btn primary" type="button" onClick={() => setErrorMessage('用户分群登记入口尚未接入审批流')}>
+          <button className="btn primary" type="button" onClick={() => reportActionError('用户分群登记入口尚未接入审批流')}>
             登记用户分群
           </button>
           <button className="btn" type="button" onClick={() => window.open(`${ENDPOINT}/export`, '_blank')}>
@@ -154,8 +148,19 @@ export default function CohortView() {
       </table>
 
       <footer className="page-foot">
-        <span>共 {total} 条分群分析记录</span>
-        {errorMessage && <span className="error-text">{errorMessage}</span>}
+        <span>
+          共 {total} 条分群分析记录
+          {loading && <em className="loading-text">读取中…</em>}
+          {isStale && !loading && <em className="stale-text">（当前为上一次成功读取的结果）</em>}
+        </span>
+        <span className="foot-feedback">
+          {errorMessage && <span className="error-text">{errorMessage}</span>}
+          {errorMessage && (
+            <button className="btn retry-btn" type="button" onClick={() => void reload()}>
+              重试当前读取
+            </button>
+          )}
+        </span>
       </footer>
     </section>
   )
